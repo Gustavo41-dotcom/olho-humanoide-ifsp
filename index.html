@@ -17,7 +17,7 @@
         
         .status-box { margin-top: 15px; display: flex; gap: 20px; }
         .indicator { padding: 10px; border-radius: 8px; background: white; box-shadow: 0 2px 5px rgba(0,0,0,0.1); font-weight: bold; }
-        #blink-status { color: #d9534f; } /* Vermelho para destaque */
+        #blink-status { color: #d9534f; transition: all 0.1s; }
     </style>
 </head>
 <body>
@@ -54,6 +54,11 @@
         let port; 
         let writer; 
         let btCharacteristic; 
+        let lastSendTime = 0; // Para o limitador de taxa
+
+        // Variáveis para suavização (Filtro)
+        let smoothX = 0.5;
+        let smoothY = 0.5;
 
         async function setupIA() {
             const filesetResolver = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm");
@@ -62,7 +67,7 @@
                     modelAssetPath: `https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task`, 
                     delegate: "GPU" 
                 },
-                outputFaceBlendshapes: true, // Reativado para detectar o piscar
+                outputFaceBlendshapes: true,
                 runningMode: "VIDEO",
                 numFaces: 1,
                 minFaceDetectionConfidence: 0.5,
@@ -86,23 +91,27 @@
                 if (results.faceLandmarks && results.faceLandmarks.length > 0) {
                     const landmarks = results.faceLandmarks[0];
                     
-                    // --- RASTREIO DA ÍRIS ---
                     const irisLeft = landmarks[468];
                     const irisRight = landmarks[473];
 
-                    // Cálculo da média do olhar
-                    const avgX = ((irisLeft.x + irisRight.x) / 2).toFixed(2);
-                    const avgY = ((irisLeft.y + irisRight.y) / 2).toFixed(2);
+                    // --- FILTRO DE SUAVIZAÇÃO ---
+                    const rawX = (irisLeft.x + irisRight.x) / 2;
+                    const rawY = (irisLeft.y + irisRight.y) / 2;
+                    
+                    smoothX = (smoothX * 0.6) + (rawX * 0.4);
+                    smoothY = (smoothY * 0.6) + (rawY * 0.4);
 
-                    // --- DETECÇÃO DE PISCAR (BLENDSHAPES) ---
+                    const avgX = smoothX.toFixed(2);
+                    const avgY = smoothY.toFixed(2);
+
+                    // --- DETECÇÃO DE PISCAR ---
                     let piscar = false;
                     if (results.faceBlendshapes && results.faceBlendshapes.length > 0) {
                         const shapes = results.faceBlendshapes[0].categories;
-                        // Pegamos a média de fechamento dos dois olhos (valor de 0 a 1)
                         const scoreEsquerdo = shapes.find(s => s.categoryName === "eyeBlinkLeft").score;
                         const scoreDireito = shapes.find(s => s.categoryName === "eyeBlinkRight").score;
                         
-                        if (scoreEsquerdo > 0.4 || scoreDireito > 0.4) {
+                        if (scoreEsquerdo > 0.35 || scoreDireito > 0.35) { // Threshold levemente mais sensível
                             piscar = true;
                             blinkStatus.innerText = "Olhos: PISCANDO";
                             blinkStatus.style.backgroundColor = "#ffcccc";
@@ -112,22 +121,21 @@
                         }
                     }
 
-                    // --- ATUALIZAÇÃO DO SIMULADOR (Destaque para visualização) ---
-                    // Desenha ponto no olho esquerdo
-                    canvasCtx.fillStyle = "#00FF00"; // Verde para visibilidade
-                    canvasCtx.beginPath();
-                    canvasCtx.arc(irisLeft.x * canvasElement.width, irisLeft.y * canvasElement.height, 6, 0, 2 * Math.PI);
-                    canvasCtx.fill();
+                    // --- VISUALIZAÇÃO NO SIMULADOR ---
+                    canvasCtx.fillStyle = "#00FF00";
+                    [irisLeft, irisRight].forEach(iris => {
+                        canvasCtx.beginPath();
+                        canvasCtx.arc(iris.x * canvasElement.width, iris.y * canvasElement.height, 6, 0, 2 * Math.PI);
+                        canvasCtx.fill();
+                    });
 
-                    // Desenha ponto no olho direito
-                    canvasCtx.beginPath();
-                    canvasCtx.arc(irisRight.x * canvasElement.width, irisRight.y * canvasElement.height, 6, 0, 2 * Math.PI);
-                    canvasCtx.fill();
-
-                    // --- ENVIO DE DADOS ---
+                    // --- ENVIO CONTROLADO (THROTTLING) ---
                     dataDisplay.innerText = `X: ${avgX}, Y: ${avgY}`;
-                    // Enviamos X, Y e um valor 1 ou 0 para piscar
-                    enviarDados(avgX, avgY, piscar ? 1 : 0);
+                    const agora = Date.now();
+                    if (agora - lastSendTime > 50) { // Envia apenas a cada 50ms
+                        enviarDados(avgX, avgY, piscar ? 1 : 0);
+                        lastSendTime = agora;
+                    }
                 }
             }
             window.requestAnimationFrame(predictWebcam);
@@ -157,7 +165,7 @@
         });
 
         async function enviarDados(x, y, p) {
-            const msg = `${x},${y},${p}\n`; // Agora envia X, Y e P (Piscar)
+            const msg = `${x},${y},${p}\n`;
             const encoder = new TextEncoder();
             const data = encoder.encode(msg);
             if (writer) await writer.write(data);
